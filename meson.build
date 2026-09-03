@@ -6,11 +6,13 @@ gtk_dep = dependency('gtk4')
 gst_dep = dependency('gstreamer-1.0', version : '>=1.20')
 gst_audio_dep = dependency('gstreamer-audio-1.0', version : '>=1.20')
 m_dep = meson.get_compiler('c').find_library('m', required : true)
+check_dep = dependency('check', required : true)
 
 flipclock_deps = [gtk_dep, gst_dep, gst_audio_dep, m_dep]
 
 flipclock_sources = [
   'src/main.c',
+  'src/clock_model.c',
 ]
 
 executable('flipclock',

@@ -4,7 +4,7 @@
 #include <gtk/gtk.h>
 
 #define CLOCK_VIEW_WIDTH  700
-#define CLOCK_VIEW_HEIGHT 420
+#define CLOCK_VIEW_HEIGHT 390
 
 /* Creates the drawing area that renders the flip-clock chrome (wood
  * case, digit panel, tuner scale, knobs, wordmark) per the design

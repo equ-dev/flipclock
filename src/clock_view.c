@@ -9,14 +9,10 @@
 #include <math.h>
 #include <stdio.h>
 
-/* -std=c11 (strict ISO C) hides POSIX/BSD math macros like M_PI unless
- * a feature-test macro is defined before including <math.h>. Fall back
- * to a literal definition rather than relying on that. */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Colors lifted from the design mockup (see conversation history). */
 #define COL_CASE_BODY      0.541, 0.353, 0.204   /* #8a5a34 */
 #define COL_CASE_TOP       0.588, 0.388, 0.235   /* #96633c */
 #define COL_CASE_BORDER    0.361, 0.231, 0.129   /* #5c3b21 */
@@ -31,81 +27,66 @@
 #define COL_SCALE_TICK     0.290, 0.271, 0.235   /* #4a453c */
 #define COL_NEEDLE         0.847, 0.294, 0.165   /* #d84b2a */
 
-/* Per-view animation state. Phase 3 assumes a single clock-view
- * instance (this app has exactly one window/clock). It's attached to
- * the widget via g_object_set_data_full, so it's still per-widget in
- * principle -- a multi-instance app would work, each ticking
- * independently -- but nothing here is a global singleton. */
 typedef struct {
   FlipUnit hour_unit;
   FlipUnit tens_min_unit;
   FlipUnit ones_min_unit;
-  gint64 last_frame_time_us; /* 0 until the first tick */
+  gint64 last_frame_time_us;
 
   RadioController radio;
-  double needle_dial_x;   /* current needle tip x, follows drag or settles on a preset */
+  double needle_dial_x;
   gboolean dragging;
 
   AlarmState alarm;
   Buzzer buzzer;
-  gboolean was_ringing; /* for detecting the ringing rising/falling edge */
+  gboolean was_ringing;
 
-  double volume;                 /* 0.0-1.0 */
+  double volume;
   gboolean dragging_volume;
   double volume_drag_start_y;
   double volume_drag_start_value;
 } ClockViewState;
 
-/* How long a single digit's flip takes, start to settle. Real
- * mechanical flip clocks land somewhere around 0.3-0.6s per flip. */
 #define FLIP_ANIM_DURATION_SECONDS 0.45
 
-/* Digit cell layout, inside the black display panel (185,192,180,96). */
-#define DIGIT_CELL_Y 196
-#define DIGIT_CELL_H 88
-#define HOUR_CELL_X 190
-#define HOUR_CELL_W 62
-#define COLON_CELL_X 254
-#define TENMIN_CELL_X 268
-#define TENMIN_CELL_W 46
-#define ONEMIN_CELL_X 316
-#define ONEMIN_CELL_W 46
-#define DIGIT_FONT_SIZE 48
+#define DIGIT_CELL_Y 198
+#define DIGIT_CELL_H 56
+#define HOUR_CELL_X 132
+#define HOUR_CELL_W 48
+#define COLON_DOT_X 188
+#define TENMIN_CELL_X 196
+#define TENMIN_CELL_W 32
+#define ONEMIN_CELL_X 230
+#define ONEMIN_CELL_W 32
+#define DIGIT_FONT_SIZE 34
 
-/* Tuner needle geometry and drag hit-region. The draggable strip covers
- * just the frequency-scale area, not the whole display panel, so it
- * doesn't compete with the digit cells or the alarm/volume knob. */
-#define NEEDLE_PIVOT_X 510
-#define NEEDLE_PIVOT_Y 295
-#define NEEDLE_TIP_Y   215
-#define NEEDLE_MIN_X   410
-#define NEEDLE_MAX_X   610
-#define TUNER_HIT_X0   395
-#define TUNER_HIT_X1   620
-#define TUNER_HIT_Y0   195
-#define TUNER_HIT_Y1   285
+#define NEEDLE_PIVOT_X 458
+#define NEEDLE_PIVOT_Y 280
+#define NEEDLE_TIP_Y   200
+#define NEEDLE_MIN_X   303
+#define NEEDLE_MAX_X   578
+#define TUNER_HIT_X0   270
+#define TUNER_HIT_X1   590
+#define TUNER_HIT_Y0   200
+#define TUNER_HIT_Y1   245
 
-/* Control positions, matching the knobs/switch drawn on the case.
- * Reused here for both drawing and click/drag hit-testing so the
- * two never drift apart. */
-#define ALARM_HOUR_KNOB_X 150
-#define ALARM_HOUR_KNOB_Y 90
-#define ALARM_HOUR_KNOB_R 16
-#define ALARM_MIN_KNOB_X  220
-#define ALARM_MIN_KNOB_Y  90
-#define ALARM_MIN_KNOB_R  16
-#define SNOOZE_KNOB_X     470
-#define SNOOZE_KNOB_Y     90
-#define SNOOZE_KNOB_R     14
-#define ALARM_SWITCH_X    540
-#define ALARM_SWITCH_Y    82
-#define ALARM_SWITCH_W    26
-#define ALARM_SWITCH_H    12
-#define VOLUME_KNOB_X     115
-#define VOLUME_KNOB_Y     240
-#define VOLUME_KNOB_R     18
-#define VOLUME_DRAG_RANGE_PX 120.0 /* pixels of drag for the full 0..1 volume range */
-
+#define ALARM_HOUR_KNOB_X 185
+#define ALARM_HOUR_KNOB_Y 155
+#define ALARM_HOUR_KNOB_R 10
+#define ALARM_MIN_KNOB_X  216
+#define ALARM_MIN_KNOB_Y  155
+#define ALARM_MIN_KNOB_R  10
+#define SNOOZE_KNOB_X     450
+#define SNOOZE_KNOB_Y     155
+#define SNOOZE_KNOB_R     9
+#define ALARM_SWITCH_X    480
+#define ALARM_SWITCH_Y    150
+#define ALARM_SWITCH_W    24
+#define ALARM_SWITCH_H    10
+#define VOLUME_KNOB_X     595
+#define VOLUME_KNOB_Y     155
+#define VOLUME_KNOB_R     10
+#define VOLUME_DRAG_RANGE_PX 120.0
 
 static void
 rounded_rect (cairo_t *cr, double x, double y, double w, double h, double r)
@@ -141,10 +122,6 @@ draw_text (cairo_t *cr, double x, double y, const char *text,
   cairo_show_text (cr, text);
 }
 
-/* Draws label so its glyph bounding box is vertically and horizontally
- * centered at (cx, cy). Using this same anchor for every half-digit
- * draw call is what keeps the top and bottom halves lining up exactly
- * at the seam regardless of which digit is being drawn. */
 static void
 draw_digit_centered (cairo_t *cr, double cx, double cy, const char *label, double size)
 {
@@ -161,13 +138,6 @@ draw_digit_centered (cairo_t *cr, double cx, double cy, const char *label, doubl
   cairo_show_text (cr, label);
 }
 
-/* Draws one half (top or bottom) of a digit, folded toward the hinge
- * line by scale_factor (1.0 = flat/fully open, ~0.0 = collapsed/
- * edge-on). This is a 2D approximation of the mechanical leaf's
- * rotation: Cairo has no true 3D perspective, so vertical scaling about
- * the hinge stands in for the foreshortening a real rotating card would
- * show. It's the same trick most software flip-clock implementations
- * use, and reads convincingly at this size. */
 static void
 draw_half_digit (cairo_t *cr, double cell_cx, double cell_x, double cell_w,
                   double hinge_y, double half_h, gboolean top_half,
@@ -191,12 +161,6 @@ draw_half_digit (cairo_t *cr, double cell_cx, double cell_x, double cell_w,
   cairo_restore (cr);
 }
 
-/* Renders one independently-flipping digit cell. When settled, this is
- * just the current digit split by a seam line (matching the real
- * device's look even at rest). While animating, it runs the two-phase
- * leaf sequence: first the old top folds away to reveal the new top
- * (already fixed behind it), then the new bottom unfolds down over the
- * old bottom. */
 static void
 draw_flip_cell (cairo_t *cr, double cell_x, double cell_w,
                  double hinge_y, double half_h, const FlipUnit *unit)
@@ -210,10 +174,7 @@ draw_flip_cell (cairo_t *cr, double cell_x, double cell_w,
     }
   else if (unit->progress < 0.5)
     {
-      /* Phase A (progress 0 -> 0.5, leaf angle 0deg -> 90deg): old top
-       * leaf collapses toward the hinge; the new top is already drawn
-       * underneath, revealed as the leaf shrinks. Bottom is untouched. */
-      double angle = unit->progress * M_PI; /* 0 -> pi/2 over this phase */
+      double angle = unit->progress * M_PI;
       double s = cos (angle);
 
       draw_half_digit (cr, cell_cx, cell_x, cell_w, hinge_y, half_h, TRUE, unit->target_label, 1.0);
@@ -222,10 +183,7 @@ draw_flip_cell (cairo_t *cr, double cell_x, double cell_w,
     }
   else
     {
-      /* Phase B (progress 0.5 -> 1.0, leaf angle 90deg -> 0deg): new
-       * bottom leaf unfolds from the hinge, covering the old bottom
-       * that's still drawn underneath. Top is now fully the new digit. */
-      double local_progress = (unit->progress - 0.5) * 2.0; /* 0..1 */
+      double local_progress = (unit->progress - 0.5) * 2.0;
       double s = sin (local_progress * M_PI / 2.0);
 
       draw_half_digit (cr, cell_cx, cell_x, cell_w, hinge_y, half_h, TRUE, unit->target_label, 1.0);
@@ -233,8 +191,6 @@ draw_flip_cell (cairo_t *cr, double cell_x, double cell_w,
       draw_half_digit (cr, cell_cx, cell_x, cell_w, hinge_y, half_h, FALSE, unit->target_label, s);
     }
 
-  /* Seam line across the hinge, matching the real device's split-flap
-   * card gap. */
   cairo_set_source_rgb (cr, 0, 0, 0);
   cairo_set_line_width (cr, 1.0);
   cairo_move_to (cr, cell_x, hinge_y);
@@ -362,7 +318,6 @@ on_drag_update (GtkGestureDrag *gesture, double offset_x, double offset_y, gpoin
 
   if (state->dragging_volume)
     {
-      /* Dragging up increases volume; dragging down decreases it. */
       double delta = -offset_y / VOLUME_DRAG_RANGE_PX;
       double new_volume = state->volume_drag_start_value + delta;
       if (new_volume < 0.0) new_volume = 0.0;
@@ -398,7 +353,7 @@ on_drag_end (GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer
 
   if (state->dragging_volume)
     {
-      (void) offset_y; /* final value already applied in on_drag_update */
+      (void) offset_y;
       state->dragging_volume = FALSE;
       gtk_widget_queue_draw (widget);
       return;
@@ -460,38 +415,57 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
 
   ClockViewState *state = g_object_get_data (G_OBJECT (area), "clock-view-state");
 
-  /* Wood case body. */
+  cairo_set_source_rgb (cr, 0.11, 0.10, 0.09);
+  rounded_rect (cr, 90, 322, 520, 22, 6);
+  cairo_fill (cr);
+  cairo_set_source_rgb (cr, 0.165, 0.141, 0.125);
+  rounded_rect (cr, 70, 304, 560, 26, 8);
+  cairo_fill (cr);
+
   cairo_set_source_rgb (cr, COL_CASE_BODY);
-  rounded_rect (cr, 40, 60, 620, 300, 14);
+  rounded_rect (cr, 55, 140, 590, 30, 8);
   cairo_fill (cr);
-
-  /* Lighter top strip. */
-  cairo_save (cr);
-  rounded_rect (cr, 40, 60, 620, 300, 14);
-  cairo_clip (cr);
-  cairo_set_source_rgb (cr, COL_CASE_TOP);
-  cairo_rectangle (cr, 40, 60, 620, 60);
+  cairo_set_source_rgb (cr, 0.247, 0.184, 0.129);
+  cairo_rectangle (cr, 55, 146, 590, 2);
   cairo_fill (cr);
-  cairo_restore (cr);
-
+  cairo_set_source_rgb (cr, 0.431, 0.333, 0.251);
+  cairo_rectangle (cr, 55, 156, 590, 2);
+  cairo_fill (cr);
   cairo_set_source_rgb (cr, COL_CASE_BORDER);
   cairo_set_line_width (cr, 2.0);
-  rounded_rect (cr, 40, 60, 620, 300, 14);
+  rounded_rect (cr, 55, 140, 590, 30, 8);
   cairo_stroke (cr);
 
-  /* Top control knobs -- alarm hour, alarm minute, snooze, on/off switch. */
+  cairo_set_source_rgb (cr, 0.227, 0.173, 0.125);
+  for (int x = 240; x <= 432; x += 12)
+    {
+      cairo_arc (cr, x, 148, 1.6, 0, 2 * M_PI);
+      cairo_fill (cr);
+    }
+
   draw_knob (cr, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, ALARM_HOUR_KNOB_R);
   cairo_set_source_rgb (cr, COL_CASE_BORDER);
-  cairo_arc (cr, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, 4, 0, 2 * M_PI);
+  cairo_arc (cr, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, 6.5, 0, 2 * M_PI);
+  cairo_set_line_width (cr, 0.8);
+  cairo_stroke (cr);
+  cairo_rectangle (cr, ALARM_HOUR_KNOB_X - 1.5, ALARM_HOUR_KNOB_Y - 6, 3, 4.5);
   cairo_fill (cr);
 
   draw_knob (cr, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, ALARM_MIN_KNOB_R);
   cairo_set_source_rgb (cr, COL_CASE_BORDER);
-  cairo_arc (cr, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, 4, 0, 2 * M_PI);
+  cairo_arc (cr, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, 6.5, 0, 2 * M_PI);
+  cairo_set_line_width (cr, 0.8);
+  cairo_stroke (cr);
+  cairo_rectangle (cr, ALARM_MIN_KNOB_X - 1.5, ALARM_MIN_KNOB_Y - 6, 3, 4.5);
   cairo_fill (cr);
 
-  /* Snooze knob glows red while the alarm is ringing. */
   draw_knob (cr, SNOOZE_KNOB_X, SNOOZE_KNOB_Y, SNOOZE_KNOB_R);
+  cairo_set_source_rgb (cr, COL_CASE_BORDER);
+  cairo_arc (cr, SNOOZE_KNOB_X, SNOOZE_KNOB_Y, 5.8, 0, 2 * M_PI);
+  cairo_set_line_width (cr, 0.8);
+  cairo_stroke (cr);
+  cairo_rectangle (cr, SNOOZE_KNOB_X - 1.5, SNOOZE_KNOB_Y - 5.5, 3, 4);
+  cairo_fill (cr);
   if (state->alarm.ringing)
     {
       cairo_set_source_rgba (cr, COL_NEEDLE, 0.6);
@@ -500,8 +474,6 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
       cairo_stroke (cr);
     }
 
-  /* Alarm on/off switch: slid to the enabled side and a warmer color
-   * when armed, matching a real toggle switch's physical position. */
   {
     double switch_fill_r = state->alarm.enabled ? 0.482 : 0.173;
     double switch_fill_g = state->alarm.enabled ? 0.686 : 0.173;
@@ -520,47 +492,6 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
     cairo_fill (cr);
   }
 
-  /* Alarm readout: current set time, or a blinking "ALARM" while
-   * ringing. Blink is time-based (no extra state needed). */
-  {
-    char alarm_buf[24];
-    gint64 now_us = g_get_monotonic_time ();
-    gboolean blink_on = ((now_us / 500000) % 2) == 0;
-
-    if (state->alarm.ringing && blink_on)
-      {
-        cairo_set_source_rgb (cr, COL_NEEDLE);
-        draw_text (cr, 280, 95, "ALARM!", 13, TRUE, FALSE);
-      }
-    else if (state->alarm.enabled)
-      {
-        snprintf (alarm_buf, sizeof (alarm_buf), "AL %d:%02d%s",
-                  state->alarm.hour, state->alarm.minute,
-                  state->alarm.is_pm ? "P" : "A");
-        cairo_set_source_rgb (cr, COL_SCALE_TEXT);
-        draw_text (cr, 270, 95, alarm_buf, 12, FALSE, FALSE);
-      }
-    else if (!state->alarm.ringing)
-      {
-        snprintf (alarm_buf, sizeof (alarm_buf), "AL OFF %d:%02d%s",
-                  state->alarm.hour, state->alarm.minute,
-                  state->alarm.is_pm ? "P" : "A");
-        cairo_set_source_rgb (cr, COL_SCALE_TICK);
-        draw_text (cr, 260, 95, alarm_buf, 11, FALSE, FALSE);
-      }
-  }
-
-  /* Display panel: black oval with white trim. */
-  cairo_set_source_rgb (cr, COL_PANEL_BG);
-  rounded_rect (cr, 70, 150, 560, 180, 90);
-  cairo_fill (cr);
-  cairo_set_source_rgb (cr, COL_PANEL_TRIM);
-  cairo_set_line_width (cr, 4.0);
-  rounded_rect (cr, 70, 150, 560, 180, 90);
-  cairo_stroke (cr);
-
-  /* Volume knob, with a rotating indicator line (like a real rotary
-   * knob) sweeping from -135deg to +135deg across the 0.0-1.0 range. */
   draw_knob (cr, VOLUME_KNOB_X, VOLUME_KNOB_Y, VOLUME_KNOB_R);
   {
     double angle = (-135.0 + state->volume * 270.0) * M_PI / 180.0;
@@ -573,9 +504,38 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
     cairo_stroke (cr);
   }
 
-  /* Digit panel background. */
+  cairo_set_source_rgb (cr, 0.290, 0.227, 0.161);
+  cairo_move_to (cr, 55, 175); cairo_line_to (cr, 30, 210);
+  cairo_line_to (cr, 30, 317); cairo_line_to (cr, 55, 285);
+  cairo_close_path (cr);
+  cairo_fill (cr);
+  cairo_move_to (cr, 645, 175); cairo_line_to (cr, 670, 210);
+  cairo_line_to (cr, 670, 317); cairo_line_to (cr, 645, 285);
+  cairo_close_path (cr);
+  cairo_fill (cr);
+
+  cairo_set_source_rgb (cr, 0.039, 0.039, 0.039);
+  rounded_rect (cr, 30, 170, 640, 140, 18);
+  cairo_fill (cr);
+  cairo_set_source_rgb (cr, 0.788, 0.788, 0.788);
+  cairo_set_line_width (cr, 3.0);
+  rounded_rect (cr, 30, 170, 640, 140, 18);
+  cairo_stroke (cr);
+  cairo_set_source_rgba (cr, 0.847, 0.847, 0.847, 0.55);
+  rounded_rect (cr, 34, 174, 632, 7, 4);
+  cairo_fill (cr);
+
+  cairo_set_source_rgb (cr, COL_PANEL_BG);
+  rounded_rect (cr, 55, 188, 600, 102, 10);
+  cairo_fill (cr);
+
+  ClockTime ct;
+  clock_time_now (&ct);
+  cairo_set_source_rgb (cr, COL_NEEDLE);
+  draw_text (cr, 90, 218, clock_time_ampm_string (&ct), 13, TRUE, FALSE);
+
   cairo_set_source_rgb (cr, COL_DIGIT_BG);
-  rounded_rect (cr, 185, 192, 180, 96, 6);
+  rounded_rect (cr, 126, 196, 140, 60, 4);
   cairo_fill (cr);
 
   double hinge_y = DIGIT_CELL_Y + DIGIT_CELL_H / 2.0;
@@ -585,45 +545,61 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
   draw_flip_cell (cr, TENMIN_CELL_X, TENMIN_CELL_W, hinge_y, half_h, &state->tens_min_unit);
   draw_flip_cell (cr, ONEMIN_CELL_X, ONEMIN_CELL_W, hinge_y, half_h, &state->ones_min_unit);
 
-  /* Colon between hour and minutes -- static, doesn't flip. */
   cairo_set_source_rgb (cr, COL_DIGIT_TEXT);
-  cairo_arc (cr, COLON_CELL_X + 6, hinge_y - 14, 3.5, 0, 2 * M_PI);
+  cairo_arc (cr, COLON_DOT_X, hinge_y - 10, 2.5, 0, 2 * M_PI);
   cairo_fill (cr);
-  cairo_arc (cr, COLON_CELL_X + 6, hinge_y + 14, 3.5, 0, 2 * M_PI);
+  cairo_arc (cr, COLON_DOT_X, hinge_y + 10, 2.5, 0, 2 * M_PI);
   cairo_fill (cr);
 
-  /* AM/PM -- reflects the live clock, doesn't flip. */
-  ClockTime ct;
-  clock_time_now (&ct);
-  cairo_set_source_rgb (cr, COL_AMPM_TEXT);
-  draw_text (cr, 195, 285, clock_time_ampm_string (&ct), 13, FALSE, FALSE);
+  {
+    char alarm_buf[24];
+    gint64 now_us = g_get_monotonic_time ();
+    gboolean blink_on = ((now_us / 500000) % 2) == 0;
 
-  /* Tuner scale labels. Spacing here is wider than the original mockup
-   * sketch -- Cairo's default (non-Pango) text layout has no kerning
-   * awareness of neighboring calls, so tight label spacing overlapped. */
+    if (state->alarm.ringing && blink_on)
+      {
+        cairo_set_source_rgb (cr, COL_NEEDLE);
+        draw_text (cr, 128, 282, "ALARM!", 12, TRUE, FALSE);
+      }
+    else if (state->alarm.enabled)
+      {
+        snprintf (alarm_buf, sizeof (alarm_buf), "AL %d:%02d%s",
+                  state->alarm.hour, state->alarm.minute,
+                  state->alarm.is_pm ? "P" : "A");
+        cairo_set_source_rgb (cr, COL_SCALE_TEXT);
+        draw_text (cr, 128, 282, alarm_buf, 11, FALSE, FALSE);
+      }
+    else if (!state->alarm.ringing)
+      {
+        snprintf (alarm_buf, sizeof (alarm_buf), "AL OFF %d:%02d%s",
+                  state->alarm.hour, state->alarm.minute,
+                  state->alarm.is_pm ? "P" : "A");
+        cairo_set_source_rgb (cr, COL_SCALE_TICK);
+        draw_text (cr, 128, 282, alarm_buf, 10, FALSE, FALSE);
+      }
+  }
+
   cairo_set_source_rgb (cr, COL_SCALE_TEXT);
-  draw_text (cr, 395, 205, "FM", 10, FALSE, FALSE);
-  draw_text (cr, 395, 278, "AM", 10, FALSE, FALSE);
+  draw_text (cr, 278, 212, "FM", 10, FALSE, FALSE);
+  draw_text (cr, 278, 234, "AM", 10, FALSE, FALSE);
 
   const char *fm_marks[] = { "88", "92", "96", "100", "104", "108" };
-  double fm_x[] = { 440, 472, 504, 536, 568, 598 };
+  double fm_x[] = { 308, 336, 364, 390, 420, 448 };
   for (int i = 0; i < 6; i++)
-    draw_text (cr, fm_x[i], 205, fm_marks[i], 10, FALSE, FALSE);
-  draw_text (cr, 612, 205, "MHz", 10, FALSE, FALSE);
+    draw_text (cr, fm_x[i], 212, fm_marks[i], 10, FALSE, FALSE);
+  draw_text (cr, 483, 212, "MHz", 10, FALSE, FALSE);
 
-  const char *am_marks[] = { "53", "60", "70", "90", "100", "130", "160" };
-  double am_x[] = { 438, 465, 492, 519, 546, 573, 596 };
-  for (int i = 0; i < 7; i++)
-    draw_text (cr, am_x[i], 278, am_marks[i], 10, FALSE, FALSE);
-  draw_text (cr, 612, 278, "xkkHz", 10, FALSE, FALSE);
+  const char *am_marks[] = { "53", "65", "80", "100", "130", "160" };
+  double am_x[] = { 308, 333, 358, 386, 414, 442 };
+  for (int i = 0; i < 6; i++)
+    draw_text (cr, am_x[i], 234, am_marks[i], 10, FALSE, FALSE);
+  draw_text (cr, 483, 234, "xkkHz", 10, FALSE, FALSE);
 
   cairo_set_source_rgb (cr, COL_SCALE_TICK);
   cairo_set_line_width (cr, 1.0);
-  cairo_move_to (cr, 432, 212); cairo_line_to (cr, 432, 270); cairo_stroke (cr);
-  cairo_move_to (cr, 605, 212); cairo_line_to (cr, 605, 270); cairo_stroke (cr);
+  cairo_move_to (cr, 303, 218); cairo_line_to (cr, 303, 240); cairo_stroke (cr);
+  cairo_move_to (cr, 578, 218); cairo_line_to (cr, 578, 240); cairo_stroke (cr);
 
-  /* Tuning needle: follows the live drag position, or rests at the
-   * tuned preset's dial_x once settled. */
   cairo_set_source_rgb (cr, COL_NEEDLE);
   cairo_set_line_width (cr, 3.0);
   cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
@@ -633,8 +609,6 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
   cairo_arc (cr, NEEDLE_PIVOT_X, NEEDLE_PIVOT_Y, 4, 0, 2 * M_PI);
   cairo_fill (cr);
 
-  /* Station readout: shows what's actually tuned/playing, or a hint
-   * to drag the dial if nothing is tuned yet. */
   cairo_set_source_rgb (cr, COL_SCALE_TEXT);
   const char *station_text;
   if (state->radio.has_error)
@@ -643,13 +617,10 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
     station_text = radio_presets[state->radio.current_preset].label;
   else
     station_text = "drag dial to tune";
-  draw_text (cr, 395, 340, station_text, 12, FALSE, FALSE);
+  draw_text (cr, 278, 282, station_text, 11, FALSE, FALSE);
 
-  /* Wordmark. Bold only, no italic: with Georgia unavailable this
-   * substitutes to DejaVu Serif, whose bold-italic kerning at this size
-   * rendered "Panasonic" illegibly (looked like "Panasomc"). */
   cairo_set_source_rgb (cr, COL_DIGIT_TEXT);
-  draw_text (cr, 480, 322, "Panasonic", 22, TRUE, FALSE);
+  draw_text (cr, 453, 270, "Panasonic", 20, FALSE, TRUE);
 }
 
 static void

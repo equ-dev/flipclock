@@ -14,6 +14,7 @@ flipclock_sources = [
   'src/main.c',
   'src/clock_model.c',
   'src/clock_view.c',
+  'src/flip_anim.c',
 ]
 
 executable('flipclock',

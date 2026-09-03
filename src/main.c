@@ -1,9 +1,11 @@
 #include <gtk/gtk.h>
 
+#include "clock_view.h"
+
 /* Fixed window size matched to the flip clock's proportions (see design
  * mockup: a wide, short case housing the digit panel and tuner dial). */
-#define FLIPCLOCK_WIN_WIDTH  700
-#define FLIPCLOCK_WIN_HEIGHT 420
+#define FLIPCLOCK_WIN_WIDTH  CLOCK_VIEW_WIDTH
+#define FLIPCLOCK_WIN_HEIGHT CLOCK_VIEW_HEIGHT
 
 static void
 activate (GtkApplication *app, gpointer user_data)
@@ -17,10 +19,11 @@ activate (GtkApplication *app, gpointer user_data)
                                 FLIPCLOCK_WIN_HEIGHT);
   gtk_window_set_resizable (GTK_WINDOW (window), FALSE);
 
-  /* Placeholder content for Phase 0. Phase 2 replaces this with the
-   * wood-case / digit-panel / tuner drawing area from the design mockup. */
-  GtkWidget *label = gtk_label_new ("Flip Clock scaffold — Phase 0");
-  gtk_window_set_child (GTK_WINDOW (window), label);
+  /* Phase 2: static chrome from the design mockup (wood case, digit
+   * panel, tuner scale, knobs, wordmark). Not yet wired to real
+   * clock/tuner data or the flip animation -- that's Phases 3-4. */
+  GtkWidget *view = clock_view_new ();
+  gtk_window_set_child (GTK_WINDOW (window), view);
 
   gtk_window_present (GTK_WINDOW (window));
 }

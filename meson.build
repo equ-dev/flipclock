@@ -13,6 +13,7 @@ flipclock_deps = [gtk_dep, gst_dep, gst_audio_dep, m_dep]
 flipclock_sources = [
   'src/main.c',
   'src/clock_model.c',
+  'src/clock_view.c',
 ]
 
 executable('flipclock',

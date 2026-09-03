@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <gst/gst.h>
 
 #include "clock_view.h"
 
@@ -31,6 +32,8 @@ activate (GtkApplication *app, gpointer user_data)
 int
 main (int argc, char **argv)
 {
+  gst_init (&argc, &argv);
+
   GtkApplication *app = gtk_application_new ("com.example.flipclock",
                                               G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);

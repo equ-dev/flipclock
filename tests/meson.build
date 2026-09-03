@@ -9,3 +9,9 @@ test_flip_anim = executable('test_flip_anim',
   dependencies : [check_dep])
 
 test('flip_anim', test_flip_anim)
+
+test_radio = executable('test_radio',
+  ['test_radio.c', '../src/radio.c'],
+  dependencies : [check_dep, gst_dep, m_dep])
+
+test('radio', test_radio)

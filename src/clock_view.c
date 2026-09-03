@@ -2,6 +2,7 @@
 
 #include "clock_model.h"
 #include "flip_anim.h"
+#include "radio.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -38,6 +39,10 @@ typedef struct {
   FlipUnit tens_min_unit;
   FlipUnit ones_min_unit;
   gint64 last_frame_time_us; /* 0 until the first tick */
+
+  RadioController radio;
+  double needle_dial_x;   /* current needle tip x, follows drag or settles on a preset */
+  gboolean dragging;
 } ClockViewState;
 
 /* How long a single digit's flip takes, start to settle. Real
@@ -55,6 +60,19 @@ typedef struct {
 #define ONEMIN_CELL_X 316
 #define ONEMIN_CELL_W 46
 #define DIGIT_FONT_SIZE 48
+
+/* Tuner needle geometry and drag hit-region. The draggable strip covers
+ * just the frequency-scale area, not the whole display panel, so it
+ * doesn't compete with the digit cells or the alarm/volume knob. */
+#define NEEDLE_PIVOT_X 510
+#define NEEDLE_PIVOT_Y 295
+#define NEEDLE_TIP_Y   215
+#define NEEDLE_MIN_X   410
+#define NEEDLE_MAX_X   610
+#define TUNER_HIT_X0   395
+#define TUNER_HIT_X1   620
+#define TUNER_HIT_Y0   195
+#define TUNER_HIT_Y1   285
 
 static void
 rounded_rect (cairo_t *cr, double x, double y, double w, double h, double r)
@@ -238,6 +256,71 @@ on_tick (GtkWidget *widget, GdkFrameClock *frame_clock, gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+static gboolean
+point_in_tuner_hitregion (double x, double y)
+{
+  return x >= TUNER_HIT_X0 && x <= TUNER_HIT_X1
+      && y >= TUNER_HIT_Y0 && y <= TUNER_HIT_Y1;
+}
+
+static void
+on_drag_begin (GtkGestureDrag *gesture, double start_x, double start_y, gpointer user_data)
+{
+  (void) user_data;
+  GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
+
+  if (!point_in_tuner_hitregion (start_x, start_y))
+    {
+      state->dragging = FALSE;
+      return;
+    }
+
+  state->dragging = TRUE;
+  state->needle_dial_x = CLAMP (start_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+  gtk_widget_queue_draw (widget);
+}
+
+static void
+on_drag_update (GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer user_data)
+{
+  (void) offset_y;
+  (void) user_data;
+  GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
+
+  if (!state->dragging)
+    return;
+
+  double start_x, start_y;
+  gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
+  state->needle_dial_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+  gtk_widget_queue_draw (widget);
+}
+
+static void
+on_drag_end (GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer user_data)
+{
+  (void) offset_y;
+  (void) user_data;
+  GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
+
+  if (!state->dragging)
+    return;
+
+  double start_x, start_y;
+  gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
+  double final_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+
+  int preset = radio_nearest_preset (final_x);
+  state->needle_dial_x = radio_presets[preset].dial_x;
+  radio_controller_tune (&state->radio, preset);
+
+  state->dragging = FALSE;
+  gtk_widget_queue_draw (widget);
+}
+
 static void
 draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data)
 {
@@ -344,22 +427,42 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
   cairo_move_to (cr, 432, 212); cairo_line_to (cr, 432, 270); cairo_stroke (cr);
   cairo_move_to (cr, 605, 212); cairo_line_to (cr, 605, 270); cairo_stroke (cr);
 
-  /* Tuning needle (Phase 2: fixed placeholder position; Phase 4 will
-   * make this reflect the actual tuned frequency). */
+  /* Tuning needle: follows the live drag position, or rests at the
+   * tuned preset's dial_x once settled. */
   cairo_set_source_rgb (cr, COL_NEEDLE);
   cairo_set_line_width (cr, 3.0);
   cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
-  cairo_move_to (cr, 500, 290);
-  cairo_line_to (cr, 465, 215);
+  cairo_move_to (cr, NEEDLE_PIVOT_X, NEEDLE_PIVOT_Y);
+  cairo_line_to (cr, state->needle_dial_x, NEEDLE_TIP_Y);
   cairo_stroke (cr);
-  cairo_arc (cr, 500, 290, 4, 0, 2 * M_PI);
+  cairo_arc (cr, NEEDLE_PIVOT_X, NEEDLE_PIVOT_Y, 4, 0, 2 * M_PI);
   cairo_fill (cr);
+
+  /* Station readout: shows what's actually tuned/playing, or a hint
+   * to drag the dial if nothing is tuned yet. */
+  cairo_set_source_rgb (cr, COL_SCALE_TEXT);
+  const char *station_text;
+  if (state->radio.has_error)
+    station_text = "connection error";
+  else if (state->radio.current_preset >= 0)
+    station_text = radio_presets[state->radio.current_preset].label;
+  else
+    station_text = "drag dial to tune";
+  draw_text (cr, 395, 340, station_text, 12, FALSE, FALSE);
 
   /* Wordmark. Bold only, no italic: with Georgia unavailable this
    * substitutes to DejaVu Serif, whose bold-italic kerning at this size
    * rendered "Panasonic" illegibly (looked like "Panasomc"). */
   cairo_set_source_rgb (cr, COL_DIGIT_TEXT);
   draw_text (cr, 480, 322, "Panasonic", 22, TRUE, FALSE);
+}
+
+static void
+clock_view_state_free (gpointer data)
+{
+  ClockViewState *state = data;
+  radio_controller_dispose (&state->radio);
+  g_free (state);
 }
 
 GtkWidget *
@@ -384,14 +487,24 @@ clock_view_new (void)
 
   state->last_frame_time_us = 0;
 
+  radio_controller_init (&state->radio);
+  state->needle_dial_x = (NEEDLE_MIN_X + NEEDLE_MAX_X) / 2.0;
+  state->dragging = FALSE;
+
   GtkWidget *area = gtk_drawing_area_new ();
   gtk_drawing_area_set_content_width (GTK_DRAWING_AREA (area), CLOCK_VIEW_WIDTH);
   gtk_drawing_area_set_content_height (GTK_DRAWING_AREA (area), CLOCK_VIEW_HEIGHT);
 
-  g_object_set_data_full (G_OBJECT (area), "clock-view-state", state, g_free);
+  g_object_set_data_full (G_OBJECT (area), "clock-view-state", state, clock_view_state_free);
 
   gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (area), draw_func, NULL, NULL);
   gtk_widget_add_tick_callback (area, on_tick, NULL, NULL);
+
+  GtkGesture *drag = gtk_gesture_drag_new ();
+  g_signal_connect (drag, "drag-begin", G_CALLBACK (on_drag_begin), NULL);
+  g_signal_connect (drag, "drag-update", G_CALLBACK (on_drag_update), NULL);
+  g_signal_connect (drag, "drag-end", G_CALLBACK (on_drag_end), NULL);
+  gtk_widget_add_controller (area, GTK_EVENT_CONTROLLER (drag));
 
   return area;
 }

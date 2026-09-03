@@ -3,6 +3,8 @@
 #include "clock_model.h"
 #include "flip_anim.h"
 #include "radio.h"
+#include "alarm.h"
+#include "buzzer.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -43,6 +45,15 @@ typedef struct {
   RadioController radio;
   double needle_dial_x;   /* current needle tip x, follows drag or settles on a preset */
   gboolean dragging;
+
+  AlarmState alarm;
+  Buzzer buzzer;
+  gboolean was_ringing; /* for detecting the ringing rising/falling edge */
+
+  double volume;                 /* 0.0-1.0 */
+  gboolean dragging_volume;
+  double volume_drag_start_y;
+  double volume_drag_start_value;
 } ClockViewState;
 
 /* How long a single digit's flip takes, start to settle. Real
@@ -73,6 +84,28 @@ typedef struct {
 #define TUNER_HIT_X1   620
 #define TUNER_HIT_Y0   195
 #define TUNER_HIT_Y1   285
+
+/* Control positions, matching the knobs/switch drawn on the case.
+ * Reused here for both drawing and click/drag hit-testing so the
+ * two never drift apart. */
+#define ALARM_HOUR_KNOB_X 150
+#define ALARM_HOUR_KNOB_Y 90
+#define ALARM_HOUR_KNOB_R 16
+#define ALARM_MIN_KNOB_X  220
+#define ALARM_MIN_KNOB_Y  90
+#define ALARM_MIN_KNOB_R  16
+#define SNOOZE_KNOB_X     470
+#define SNOOZE_KNOB_Y     90
+#define SNOOZE_KNOB_R     14
+#define ALARM_SWITCH_X    540
+#define ALARM_SWITCH_Y    82
+#define ALARM_SWITCH_W    26
+#define ALARM_SWITCH_H    12
+#define VOLUME_KNOB_X     115
+#define VOLUME_KNOB_Y     240
+#define VOLUME_KNOB_R     18
+#define VOLUME_DRAG_RANGE_PX 120.0 /* pixels of drag for the full 0..1 volume range */
+
 
 static void
 rounded_rect (cairo_t *cr, double x, double y, double w, double h, double r)
@@ -241,6 +274,13 @@ tick_frame (GtkWidget *widget, ClockViewState *state)
   flip_unit_advance (&state->hour_unit, delta_seconds, FLIP_ANIM_DURATION_SECONDS);
   flip_unit_advance (&state->tens_min_unit, delta_seconds, FLIP_ANIM_DURATION_SECONDS);
   flip_unit_advance (&state->ones_min_unit, delta_seconds, FLIP_ANIM_DURATION_SECONDS);
+
+  alarm_check (&state->alarm, &ct);
+  if (state->alarm.ringing && !state->was_ringing)
+    buzzer_start (&state->buzzer);
+  else if (!state->alarm.ringing && state->was_ringing)
+    buzzer_stop (&state->buzzer);
+  state->was_ringing = state->alarm.ringing;
 }
 
 static gboolean
@@ -263,6 +303,20 @@ point_in_tuner_hitregion (double x, double y)
       && y >= TUNER_HIT_Y0 && y <= TUNER_HIT_Y1;
 }
 
+static gboolean
+point_in_circle (double x, double y, double cx, double cy, double r)
+{
+  double dx = x - cx;
+  double dy = y - cy;
+  return (dx * dx + dy * dy) <= (r * r);
+}
+
+static gboolean
+point_in_rect (double x, double y, double rx, double ry, double rw, double rh)
+{
+  return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+}
+
 static void
 on_drag_begin (GtkGestureDrag *gesture, double start_x, double start_y, gpointer user_data)
 {
@@ -270,55 +324,131 @@ on_drag_begin (GtkGestureDrag *gesture, double start_x, double start_y, gpointer
   GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
   ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
 
-  if (!point_in_tuner_hitregion (start_x, start_y))
+  state->dragging = FALSE;
+  state->dragging_volume = FALSE;
+
+  if (point_in_tuner_hitregion (start_x, start_y))
     {
-      state->dragging = FALSE;
+      state->dragging = TRUE;
+      state->needle_dial_x = CLAMP (start_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+      gtk_widget_queue_draw (widget);
       return;
     }
 
-  state->dragging = TRUE;
-  state->needle_dial_x = CLAMP (start_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
-  gtk_widget_queue_draw (widget);
+  if (point_in_circle (start_x, start_y, VOLUME_KNOB_X, VOLUME_KNOB_Y, VOLUME_KNOB_R))
+    {
+      state->dragging_volume = TRUE;
+      state->volume_drag_start_y = start_y;
+      state->volume_drag_start_value = state->volume;
+      return;
+    }
 }
 
 static void
 on_drag_update (GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer user_data)
 {
-  (void) offset_y;
   (void) user_data;
   GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
   ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
 
-  if (!state->dragging)
-    return;
+  if (state->dragging)
+    {
+      double start_x, start_y;
+      gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
+      state->needle_dial_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+      gtk_widget_queue_draw (widget);
+      return;
+    }
 
-  double start_x, start_y;
-  gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
-  state->needle_dial_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
-  gtk_widget_queue_draw (widget);
+  if (state->dragging_volume)
+    {
+      /* Dragging up increases volume; dragging down decreases it. */
+      double delta = -offset_y / VOLUME_DRAG_RANGE_PX;
+      double new_volume = state->volume_drag_start_value + delta;
+      if (new_volume < 0.0) new_volume = 0.0;
+      if (new_volume > 1.0) new_volume = 1.0;
+      state->volume = new_volume;
+      radio_controller_set_volume (&state->radio, state->volume);
+      gtk_widget_queue_draw (widget);
+      return;
+    }
 }
 
 static void
 on_drag_end (GtkGestureDrag *gesture, double offset_x, double offset_y, gpointer user_data)
 {
-  (void) offset_y;
   (void) user_data;
   GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
   ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
 
-  if (!state->dragging)
-    return;
+  if (state->dragging)
+    {
+      double start_x, start_y;
+      gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
+      double final_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
 
-  double start_x, start_y;
-  gtk_gesture_drag_get_start_point (gesture, &start_x, &start_y);
-  double final_x = CLAMP (start_x + offset_x, NEEDLE_MIN_X, NEEDLE_MAX_X);
+      int preset = radio_nearest_preset (final_x);
+      state->needle_dial_x = radio_presets[preset].dial_x;
+      radio_controller_tune (&state->radio, preset);
 
-  int preset = radio_nearest_preset (final_x);
-  state->needle_dial_x = radio_presets[preset].dial_x;
-  radio_controller_tune (&state->radio, preset);
+      state->dragging = FALSE;
+      gtk_widget_queue_draw (widget);
+      return;
+    }
 
-  state->dragging = FALSE;
-  gtk_widget_queue_draw (widget);
+  if (state->dragging_volume)
+    {
+      (void) offset_y; /* final value already applied in on_drag_update */
+      state->dragging_volume = FALSE;
+      gtk_widget_queue_draw (widget);
+      return;
+    }
+}
+
+static void
+on_click_pressed (GtkGestureClick *gesture, gint n_press, double x, double y, gpointer user_data)
+{
+  (void) n_press;
+  (void) user_data;
+  GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  ClockViewState *state = g_object_get_data (G_OBJECT (widget), "clock-view-state");
+
+  if (point_in_circle (x, y, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, ALARM_HOUR_KNOB_R))
+    {
+      alarm_adjust_hour (&state->alarm, 1);
+      gtk_widget_queue_draw (widget);
+      return;
+    }
+
+  if (point_in_circle (x, y, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, ALARM_MIN_KNOB_R))
+    {
+      alarm_adjust_minute (&state->alarm, 1);
+      gtk_widget_queue_draw (widget);
+      return;
+    }
+
+  if (point_in_circle (x, y, SNOOZE_KNOB_X, SNOOZE_KNOB_Y, SNOOZE_KNOB_R))
+    {
+      if (state->alarm.ringing)
+        {
+          ClockTime ct;
+          clock_time_now (&ct);
+          alarm_snooze (&state->alarm, &ct);
+        }
+      else
+        {
+          alarm_toggle_pm (&state->alarm);
+        }
+      gtk_widget_queue_draw (widget);
+      return;
+    }
+
+  if (point_in_rect (x, y, ALARM_SWITCH_X, ALARM_SWITCH_Y, ALARM_SWITCH_W, ALARM_SWITCH_H))
+    {
+      alarm_set_enabled (&state->alarm, !state->alarm.enabled);
+      gtk_widget_queue_draw (widget);
+      return;
+    }
 }
 
 static void
@@ -349,22 +479,76 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
   rounded_rect (cr, 40, 60, 620, 300, 14);
   cairo_stroke (cr);
 
-  /* Top control knobs. */
-  draw_knob (cr, 150, 90, 16);
+  /* Top control knobs -- alarm hour, alarm minute, snooze, on/off switch. */
+  draw_knob (cr, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, ALARM_HOUR_KNOB_R);
   cairo_set_source_rgb (cr, COL_CASE_BORDER);
-  cairo_arc (cr, 150, 90, 4, 0, 2 * M_PI);
+  cairo_arc (cr, ALARM_HOUR_KNOB_X, ALARM_HOUR_KNOB_Y, 4, 0, 2 * M_PI);
   cairo_fill (cr);
 
-  draw_knob (cr, 220, 90, 16);
+  draw_knob (cr, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, ALARM_MIN_KNOB_R);
   cairo_set_source_rgb (cr, COL_CASE_BORDER);
-  cairo_arc (cr, 220, 90, 4, 0, 2 * M_PI);
+  cairo_arc (cr, ALARM_MIN_KNOB_X, ALARM_MIN_KNOB_Y, 4, 0, 2 * M_PI);
   cairo_fill (cr);
 
-  draw_knob (cr, 470, 90, 14);
+  /* Snooze knob glows red while the alarm is ringing. */
+  draw_knob (cr, SNOOZE_KNOB_X, SNOOZE_KNOB_Y, SNOOZE_KNOB_R);
+  if (state->alarm.ringing)
+    {
+      cairo_set_source_rgba (cr, COL_NEEDLE, 0.6);
+      cairo_arc (cr, SNOOZE_KNOB_X, SNOOZE_KNOB_Y, SNOOZE_KNOB_R + 3, 0, 2 * M_PI);
+      cairo_set_line_width (cr, 2.0);
+      cairo_stroke (cr);
+    }
 
-  cairo_set_source_rgb (cr, 0.173, 0.173, 0.165); /* #2c2c2a */
-  rounded_rect (cr, 540, 82, 26, 12, 3);
-  cairo_fill (cr);
+  /* Alarm on/off switch: slid to the enabled side and a warmer color
+   * when armed, matching a real toggle switch's physical position. */
+  {
+    double switch_fill_r = state->alarm.enabled ? 0.482 : 0.173;
+    double switch_fill_g = state->alarm.enabled ? 0.686 : 0.173;
+    double switch_fill_b = state->alarm.enabled ? 0.404 : 0.165;
+    double toggle_w = ALARM_SWITCH_W / 2.0;
+    double toggle_x = state->alarm.enabled
+        ? ALARM_SWITCH_X + toggle_w
+        : ALARM_SWITCH_X;
+
+    cairo_set_source_rgb (cr, 0.09, 0.09, 0.09);
+    rounded_rect (cr, ALARM_SWITCH_X, ALARM_SWITCH_Y, ALARM_SWITCH_W, ALARM_SWITCH_H, 3);
+    cairo_fill (cr);
+
+    cairo_set_source_rgb (cr, switch_fill_r, switch_fill_g, switch_fill_b);
+    rounded_rect (cr, toggle_x, ALARM_SWITCH_Y, toggle_w, ALARM_SWITCH_H, 3);
+    cairo_fill (cr);
+  }
+
+  /* Alarm readout: current set time, or a blinking "ALARM" while
+   * ringing. Blink is time-based (no extra state needed). */
+  {
+    char alarm_buf[24];
+    gint64 now_us = g_get_monotonic_time ();
+    gboolean blink_on = ((now_us / 500000) % 2) == 0;
+
+    if (state->alarm.ringing && blink_on)
+      {
+        cairo_set_source_rgb (cr, COL_NEEDLE);
+        draw_text (cr, 280, 95, "ALARM!", 13, TRUE, FALSE);
+      }
+    else if (state->alarm.enabled)
+      {
+        snprintf (alarm_buf, sizeof (alarm_buf), "AL %d:%02d%s",
+                  state->alarm.hour, state->alarm.minute,
+                  state->alarm.is_pm ? "P" : "A");
+        cairo_set_source_rgb (cr, COL_SCALE_TEXT);
+        draw_text (cr, 270, 95, alarm_buf, 12, FALSE, FALSE);
+      }
+    else if (!state->alarm.ringing)
+      {
+        snprintf (alarm_buf, sizeof (alarm_buf), "AL OFF %d:%02d%s",
+                  state->alarm.hour, state->alarm.minute,
+                  state->alarm.is_pm ? "P" : "A");
+        cairo_set_source_rgb (cr, COL_SCALE_TICK);
+        draw_text (cr, 260, 95, alarm_buf, 11, FALSE, FALSE);
+      }
+  }
 
   /* Display panel: black oval with white trim. */
   cairo_set_source_rgb (cr, COL_PANEL_BG);
@@ -375,8 +559,19 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer us
   rounded_rect (cr, 70, 150, 560, 180, 90);
   cairo_stroke (cr);
 
-  /* Left-side volume/alarm knob set into the panel. */
-  draw_knob (cr, 115, 240, 18);
+  /* Volume knob, with a rotating indicator line (like a real rotary
+   * knob) sweeping from -135deg to +135deg across the 0.0-1.0 range. */
+  draw_knob (cr, VOLUME_KNOB_X, VOLUME_KNOB_Y, VOLUME_KNOB_R);
+  {
+    double angle = (-135.0 + state->volume * 270.0) * M_PI / 180.0;
+    double ind_x = VOLUME_KNOB_X + (VOLUME_KNOB_R - 4) * sin (angle);
+    double ind_y = VOLUME_KNOB_Y - (VOLUME_KNOB_R - 4) * cos (angle);
+    cairo_set_source_rgb (cr, COL_CASE_BORDER);
+    cairo_set_line_width (cr, 2.5);
+    cairo_move_to (cr, VOLUME_KNOB_X, VOLUME_KNOB_Y);
+    cairo_line_to (cr, ind_x, ind_y);
+    cairo_stroke (cr);
+  }
 
   /* Digit panel background. */
   cairo_set_source_rgb (cr, COL_DIGIT_BG);
@@ -462,6 +657,7 @@ clock_view_state_free (gpointer data)
 {
   ClockViewState *state = data;
   radio_controller_dispose (&state->radio);
+  buzzer_dispose (&state->buzzer);
   g_free (state);
 }
 
@@ -491,6 +687,14 @@ clock_view_new (void)
   state->needle_dial_x = (NEEDLE_MIN_X + NEEDLE_MAX_X) / 2.0;
   state->dragging = FALSE;
 
+  alarm_init (&state->alarm);
+  buzzer_init (&state->buzzer);
+  state->was_ringing = FALSE;
+
+  state->volume = 0.7;
+  state->dragging_volume = FALSE;
+  radio_controller_set_volume (&state->radio, state->volume);
+
   GtkWidget *area = gtk_drawing_area_new ();
   gtk_drawing_area_set_content_width (GTK_DRAWING_AREA (area), CLOCK_VIEW_WIDTH);
   gtk_drawing_area_set_content_height (GTK_DRAWING_AREA (area), CLOCK_VIEW_HEIGHT);
@@ -505,6 +709,10 @@ clock_view_new (void)
   g_signal_connect (drag, "drag-update", G_CALLBACK (on_drag_update), NULL);
   g_signal_connect (drag, "drag-end", G_CALLBACK (on_drag_end), NULL);
   gtk_widget_add_controller (area, GTK_EVENT_CONTROLLER (drag));
+
+  GtkGesture *click = gtk_gesture_click_new ();
+  g_signal_connect (click, "pressed", G_CALLBACK (on_click_pressed), NULL);
+  gtk_widget_add_controller (area, GTK_EVENT_CONTROLLER (click));
 
   return area;
 }

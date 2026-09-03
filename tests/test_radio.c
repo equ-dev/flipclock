@@ -49,6 +49,20 @@ START_TEST (test_midpoint_between_presets_picks_a_valid_index)
 }
 END_TEST
 
+START_TEST (test_should_retry_under_max)
+{
+  ck_assert (radio_should_retry (0));
+  ck_assert (radio_should_retry (RADIO_MAX_RETRIES - 1));
+}
+END_TEST
+
+START_TEST (test_should_not_retry_at_or_over_max)
+{
+  ck_assert (!radio_should_retry (RADIO_MAX_RETRIES));
+  ck_assert (!radio_should_retry (RADIO_MAX_RETRIES + 1));
+}
+END_TEST
+
 static Suite *
 radio_suite (void)
 {
@@ -61,6 +75,8 @@ radio_suite (void)
   tcase_add_test (tc, test_far_left_snaps_to_first_preset);
   tcase_add_test (tc, test_far_right_snaps_to_last_preset);
   tcase_add_test (tc, test_midpoint_between_presets_picks_a_valid_index);
+  tcase_add_test (tc, test_should_retry_under_max);
+  tcase_add_test (tc, test_should_not_retry_at_or_over_max);
 
   suite_add_tcase (s, tc);
   return s;

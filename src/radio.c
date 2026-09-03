@@ -31,6 +31,23 @@ radio_nearest_preset (double x)
   return best_index;
 }
 
+gboolean
+radio_should_retry (int retry_count)
+{
+  return retry_count < RADIO_MAX_RETRIES;
+}
+
+static void apply_uri_and_play (RadioController *radio, int preset_index);
+
+static gboolean
+on_retry_timeout (gpointer user_data)
+{
+  RadioController *radio = user_data;
+  radio->retry_source_id = 0;
+  apply_uri_and_play (radio, radio->current_preset);
+  return G_SOURCE_REMOVE;
+}
+
 static gboolean
 on_bus_message (GstBus *bus, GstMessage *message, gpointer user_data)
 {
@@ -54,6 +71,14 @@ on_bus_message (GstBus *bus, GstMessage *message, gpointer user_data)
 
         g_clear_error (&err);
         g_free (debug);
+
+        if (radio->current_preset >= 0 && radio_should_retry (radio->retry_count)
+            && radio->retry_source_id == 0)
+          {
+            radio->retry_count++;
+            radio->retry_source_id =
+                g_timeout_add_seconds (RADIO_RETRY_DELAY_SECONDS, on_retry_timeout, radio);
+          }
         break;
       }
     case GST_MESSAGE_EOS:
@@ -86,8 +111,8 @@ radio_controller_init (RadioController *radio)
     }
 }
 
-void
-radio_controller_tune (RadioController *radio, int preset_index)
+static void
+apply_uri_and_play (RadioController *radio, int preset_index)
 {
   if (radio->playbin == NULL)
     return;
@@ -105,10 +130,48 @@ radio_controller_tune (RadioController *radio, int preset_index)
 }
 
 void
+radio_controller_tune (RadioController *radio, int preset_index)
+{
+  if (radio->playbin == NULL)
+    return;
+  if (preset_index < 0 || preset_index >= RADIO_PRESET_COUNT)
+    return;
+
+  radio->retry_count = 0; /* fresh user-initiated tune, not a retry */
+
+  if (radio->retry_source_id != 0)
+    {
+      g_source_remove (radio->retry_source_id);
+      radio->retry_source_id = 0;
+    }
+
+  apply_uri_and_play (radio, preset_index);
+}
+
+void
+radio_controller_set_volume (RadioController *radio, double volume)
+{
+  if (radio->playbin == NULL)
+    return;
+
+  double clamped = volume;
+  if (clamped < 0.0) clamped = 0.0;
+  if (clamped > 1.0) clamped = 1.0;
+
+  g_object_set (radio->playbin, "volume", clamped, NULL);
+}
+
+void
 radio_controller_stop (RadioController *radio)
 {
   if (radio->playbin == NULL)
     return;
+
+  if (radio->retry_source_id != 0)
+    {
+      g_source_remove (radio->retry_source_id);
+      radio->retry_source_id = 0;
+    }
 
   gst_element_set_state (radio->playbin, GST_STATE_NULL);
   radio->current_preset = -1;
@@ -119,6 +182,12 @@ radio_controller_dispose (RadioController *radio)
 {
   if (radio->playbin == NULL)
     return;
+
+  if (radio->retry_source_id != 0)
+    {
+      g_source_remove (radio->retry_source_id);
+      radio->retry_source_id = 0;
+    }
 
   gst_element_set_state (radio->playbin, GST_STATE_NULL);
   gst_object_unref (radio->playbin);

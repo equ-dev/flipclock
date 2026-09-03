@@ -15,3 +15,9 @@ test_radio = executable('test_radio',
   dependencies : [check_dep, gst_dep, m_dep])
 
 test('radio', test_radio)
+
+test_alarm = executable('test_alarm',
+  ['test_alarm.c', '../src/alarm.c', '../src/clock_model.c'],
+  dependencies : [check_dep])
+
+test('alarm', test_alarm)
